@@ -1,0 +1,225 @@
+<!DOCTYPE html>
+<html lang="ar" dir="rtl">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>ESP32-CAM P2P Simulator | محاكاة الروبوت</title>
+    <style>
+        body {
+            background-color: #0f172a;
+            color: #f8fafc;
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            text-align: center;
+            margin: 0;
+            padding: 20px;
+        }
+        h2 { color: #38bdf8; }
+        .container {
+            max-width: 800px;
+            margin: 0 auto;
+            background: #1e293b;
+            padding: 20px;
+            border-radius: 12px;
+            box-shadow: 0 4px 20px rgba(0,0,0,0.5);
+        }
+        video {
+            width: 100%;
+            max-width: 480px;
+            border-radius: 8px;
+            border: 2px solid #334155;
+            background: #000;
+            margin-top: 10px;
+        }
+        button {
+            background-color: #0284c7;
+            color: white;
+            border: none;
+            padding: 12px 20px;
+            margin: 8px;
+            border-radius: 6px;
+            font-size: 16px;
+            cursor: pointer;
+            transition: 0.2s;
+        }
+        button:hover { background-color: #0369a1; }
+        button.danger { background-color: #dc2626; }
+        button.danger:hover { background-color: #b91c1c; }
+        textarea {
+            width: 90%;
+            height: 80px;
+            background: #0f172a;
+            color: #38bdf8;
+            border: 1px solid #334155;
+            border-radius: 6px;
+            padding: 10px;
+            margin: 10px 0;
+            font-family: monospace;
+        }
+        .panel {
+            margin: 15px 0;
+            padding: 15px;
+            background: #0f172a;
+            border-radius: 8px;
+        }
+        #status { font-weight: bold; color: #f59e0b; }
+    </style>
+</head>
+<body>
+
+    <div class="container">
+        <h2>محطة التحكم والتشغيل (P2P Simulator)</h2>
+        <p>الحالة: <span id="status">غير متصل</span></p>
+
+        <!-- لوحة الكاميرا وبث الفيديو -->
+        <div class="panel">
+            <h3>بث الكاميرا (موبايل -> كمبيوتر)</h3>
+            <video id="remoteVideo" autoplay playsinline></video>
+            <video id="localVideo" autoplay playsinline muted style="display:none;"></video>
+            <br>
+            <button id="startCamBtn">تشغيل كاميرا الموبايل</button>
+        </div>
+
+        <!-- لوحة ربط الاتصال اليدوي السريع (Handshake) -->
+        <div class="panel">
+            <h3>ربط الأجهزة (Peer Connection)</h3>
+            <button id="createOfferBtn">1. إنشاء اتصال (من الموبايل)</button>
+            <br>
+            <textarea id="sdpBox" placeholder="انسخ كود الربط من هنا وحطه في الجهاز التاني..."></textarea>
+            <br>
+            <button id="connectBtn">2. تنفيذ الاتصال</button>
+        </div>
+
+        <!-- لوحة الأوامر والتحكم (الزراير) -->
+        <div class="panel">
+            <h3>أوامر التحكم في الروبوت</h3>
+            <button onclick="sendCommand('vibrate')">إرسال أمر اهتزاز (Vibrate)</button>
+            <button onclick="sendCommand('flash')" class="danger">إرسال أمر فلاش (Flash)</button>
+            <p id="log" style="color: #4ade80; margin-top: 10px;"></p>
+        </div>
+    </div>
+
+    <script>
+        let localStream;
+        let peerConnection;
+        let dataChannel;
+        let isInitiator = false;
+
+        const configuration = {
+            iceServers: [{ urls: 'stun:stun.l.google.com:19302' }]
+        };
+
+        const localVideo = document.getElementById('localVideo');
+        const remoteVideo = document.getElementById('remoteVideo');
+        const sdpBox = document.getElementById('sdpBox');
+        const statusEl = document.getElementById('status');
+        const logEl = document.getElementById('log');
+
+        // 1. تشغيل الكاميرا على الموبايل
+        document.getElementById('startCamBtn').onclick = async () => {
+            try {
+                localStream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: 'environment' }, audio: false });
+                localVideo.srcObject = localStream;
+                statusEl.innerText = "الكاميرا اشتغلت، اضغط إنشاء اتصال";
+            } catch (err) {
+                alert("خطأ في تشغيل الكاميرا: " + err);
+            }
+        };
+
+        // 2. إنشاء اتصال WebRTC
+        document.getElementById('createOfferBtn').onclick = async () => {
+            isInitiator = true;
+            createPeerConnection();
+            
+            // إضافة بث الكاميرا للاتصال
+            localStream.getTracks().forEach(track => peerConnection.addTrack(track, localStream));
+
+            // إنشاء DataChannel للأوامر
+            dataChannel = peerConnection.createDataChannel("robot-commands");
+            setupDataChannel();
+
+            const offer = await peerConnection.createOffer();
+            await peerConnection.setLocalDescription(offer);
+
+            // الانتظار حتى تجمع الـ ICE candidates
+            setTimeout(() => {
+                sdpBox.value = JSON.stringify(peerConnection.localDescription);
+                statusEl.innerText = "انسخ الكود وحطه في الكمبيوتر";
+            }, 1000);
+        };
+
+        // 3. استقبال أو تنفيذ الاتصال من الكمبيوتر
+        document.getElementById('connectBtn').onclick = async () => {
+            createPeerConnection();
+            const inputData = JSON.parse(sdpBox.value);
+
+            if (inputData.type === 'offer') {
+                // أنا الكمبيوتر بستقبل الـ Offer
+                await peerConnection.setRemoteDescription(new RTCSessionDescription(inputData));
+                
+                if(localStream) {
+                    localStream.getTracks().forEach(track => peerConnection.addTrack(track, localStream));
+                }
+
+                const answer = await peerConnection.createAnswer();
+                await peerConnection.setLocalDescription(answer);
+
+                setTimeout(() => {
+                    sdpBox.value = JSON.stringify(peerConnection.localDescription);
+                    statusEl.innerText = "انسخ الـ Answer ورجعه للموبايل";
+                }, 1000);
+
+            } else if (inputData.type === 'answer') {
+                // أنا الموبايل بستقبل الـ Answer بتاع الكمبيوتر
+                await peerConnection.setRemoteDescription(new RTCSessionDescription(inputData));
+                statusEl.innerText = "متصل بنجاح 100%!";
+            }
+        };
+
+        function createPeerConnection() {
+            peerConnection = new RTCPeerConnection(configuration);
+
+            peerConnection.onicecandidate = event => {
+                if (event.candidate) {
+                    sdpBox.value = JSON.stringify(peerConnection.localDescription);
+                }
+            };
+
+            // استقبال الفيديو في الجهة الثانية (الكمبيوتر)
+            peerConnection.ontrack = event => {
+                remoteVideo.srcObject = event.streams[0];
+                statusEl.innerText = "بث الكاميرا شغال على الكمبيوتر بنجاح!";
+            };
+
+            // استقبال قناة الأوامر (على الموبايل)
+            peerConnection.ondatachannel = event => {
+                dataChannel = event.channel;
+                setupDataChannel();
+            };
+        }
+
+        function setupDataChannel() {
+            dataChannel.onopen = () => logEl.innerText = "قناة الأوامر اتفتحت!";
+            dataChannel.onmessage = event => {
+                logEl.innerText = "وصل أمر: " + event.data;
+                if (event.data === 'vibrate') {
+                    if (navigator.vibrate) navigator.vibrate(400); // الموبايل يهتز
+                } else if (event.data === 'flash') {
+                    alert("تنبيه: وصل أمر تشغيل الفلاش من الكمبيوتر!");
+                }
+            };
+        }
+
+        // إرسال الأوامر من الكمبيوتر للموبايل
+        function command(action) {
+            if (dataChannel && dataChannel.readyState === 'open') {
+                dataChannel.send(action);
+                logEl.innerText = "تم إرسال الأمر: " + action;
+            } else {
+                alert("قناة الأوامر غير متصلة بعد!");
+            }
+        }
+        
+        window.sendCommand = command;
+    </script>
+</body>
+</html>
